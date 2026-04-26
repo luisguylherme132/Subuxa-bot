@@ -1352,6 +1352,19 @@ async def slash_ticket_config(interaction: discord.Interaction):
     app.router.add_post("/owner-code", handle_owner_code)
     return app
 
+def create_app():
+    import json as _json
+    app = web.Application()
+    app.router.add_get("/",            handle_index)
+    app.router.add_get("/login",       handle_login)
+    app.router.add_get("/callback",    handle_callback)
+    app.router.add_get("/me",          handle_me)
+    app.router.add_get("/actions",     handle_actions)
+    app.router.add_get("/guilds",      handle_guilds)
+    app.router.add_get("/ws",          handle_ws)
+    app.router.add_post("/owner-code", handle_owner_code)
+    return app
+
 async def start_web():
     app = create_app()
     runner = web.AppRunner(app)
@@ -1365,3 +1378,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
