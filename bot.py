@@ -1482,7 +1482,7 @@ async def handle_remote_ticket(request):
         return web.json_response({"ok": False, "msg": str(ex)})
 
 
-    import json as _json
+def create_app():
     app = web.Application()
     app.router.add_get("/",               handle_index)
     app.router.add_get("/dashboard",      handle_dashboard)
