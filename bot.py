@@ -1352,17 +1352,151 @@ async def slash_ticket_config(interaction: discord.Interaction):
     app.router.add_post("/owner-code", handle_owner_code)
     return app
 
-def create_app():
+async def handle_dashboard(request):
+    html_path = os.path.join(os.path.dirname(__file__), "dashboard.html")
+    if not os.path.exists(html_path):
+        return web.Response(text="dashboard.html não encontrado", status=404)
+    with open(html_path, "r", encoding="utf-8") as f:
+        return web.Response(text=f.read(), content_type="text/html")
+
+async def handle_remote_mod(request):
+    """POST /remote/mod — executa ação de moderação via dashboard."""
+    data = await request.json()
+    session = SESSIONS.get(data.get("session"))
+    if not session:
+        return web.json_response({"ok": False, "msg": "Não autenticado"}, status=401)
+
+    guild_id  = int(data.get("guild_id", 0))
+    action    = data.get("action")
+    guild     = bot.get_guild(guild_id)
+    if not guild:
+        return web.json_response({"ok": False, "msg": "Servidor não encontrado"})
+
+    try:
+        if action == "ban":
+            user = await bot.fetch_user(int(data["user_id"]))
+            await guild.ban(user, reason=data.get("reason","Via dashboard"), delete_message_days=0)
+            record_action("ban", session["user"]["username"], str(user), data.get("reason",""), str(guild))
+
+        elif action == "unban":
+            user = await bot.fetch_user(int(data["user_id"]))
+            await guild.unban(user, reason=data.get("reason","Via dashboard"))
+            record_action("unban", session["user"]["username"], str(user), data.get("reason",""), str(guild))
+
+        elif action == "kick":
+            member = guild.get_member(int(data["user_id"])) or await guild.fetch_member(int(data["user_id"]))
+            await member.kick(reason=data.get("reason","Via dashboard"))
+            record_action("kick", session["user"]["username"], str(member), data.get("reason",""), str(guild))
+
+        elif action == "mute":
+            member = guild.get_member(int(data["user_id"])) or await guild.fetch_member(int(data["user_id"]))
+            until = discord.utils.utcnow() + datetime.timedelta(minutes=int(data.get("minutes",10)))
+            await member.timeout(until, reason=data.get("reason","Via dashboard"))
+            record_action("mute", session["user"]["username"], str(member), data.get("reason",""), str(guild))
+
+        elif action == "warn":
+            member = guild.get_member(int(data["user_id"])) or await guild.fetch_member(int(data["user_id"]))
+            mod_obj = type("Mod", (), {"id": 0, "guild_permissions": type("P", (), {"administrator": True})(), "top_role": type("R", (), {"position": 9999})(), "mention": session["user"]["username"]})()
+            count, auto_muted, mute_min = await apply_warn(guild, mod_obj, member, data.get("reason","Via dashboard"))
+            record_action("warn", session["user"]["username"], str(member), data.get("reason",""), str(guild))
+
+        elif action == "purge":
+            ch = guild.get_channel(int(data["channel_id"]))
+            if not ch: return web.json_response({"ok": False, "msg": "Canal não encontrado"})
+            deleted = await ch.purge(limit=int(data.get("amount",10)))
+            record_action("purge", session["user"]["username"], ch.name, f"{len(deleted)} msgs", str(guild))
+
+        return web.json_response({"ok": True})
+    except Exception as e:
+        return web.json_response({"ok": False, "msg": str(e)})
+
+async def handle_remote_config(request):
+    """POST /remote/config — configurações admin via dashboard."""
+    data = await request.json()
+    session = SESSIONS.get(data.get("session"))
+    if not session:
+        return web.json_response({"ok": False, "msg": "Não autenticado"}, status=401)
+
+    gid    = str(data.get("guild_id",""))
+    action = data.get("action")
+
+    try:
+        if action == "setlog":
+            guild_log_channels[gid] = int(data["channel_id"])
+        elif action == "setmodrole":
+            guild_mod_roles.setdefault(gid, set()).add(int(data["role_id"]))
+        elif action == "removemodrole":
+            guild_mod_roles.get(gid, set()).discard(int(data["role_id"]))
+        elif action == "setwarn":
+            guild_warn_config[gid] = {"limit": int(data["limit"]), "mute": int(data["minutes"])}
+        return web.json_response({"ok": True})
+    except Exception as e:
+        return web.json_response({"ok": False, "msg": str(e)})
+
+async def handle_remote_ticket(request):
+    """POST /remote/ticket — configurações de ticket via dashboard."""
+    data = await request.json()
+    session = SESSIONS.get(data.get("session"))
+    if not session:
+        return web.json_response({"ok": False, "msg": "Não autenticado"}, status=401)
+
+    gid  = str(data.get("guild_id",""))
+    type_ = data.get("type")
+    cfg  = ticket_config.setdefault(gid, {})
+
+    try:
+        if type_ == "embed":
+            emb = cfg.setdefault("embed", {**TICKET_DEFAULTS["embed"]})
+            if data.get("title"):        emb["title"]        = data["title"]
+            if data.get("description"):  emb["description"]  = data["description"]
+            if data.get("color"):        emb["color"]        = data["color"].lstrip("#")
+            if data.get("footer"):       emb["footer"]       = data["footer"]
+            if data.get("thumbnail"):    emb["thumbnail"]    = data["thumbnail"]
+            if data.get("button_label"): emb["button_label"] = data["button_label"]
+            if data.get("button_emoji"): emb["button_emoji"] = data["button_emoji"]
+        elif type_ == "mensagem":
+            if data.get("welcome"): cfg["welcome_msg"] = data["welcome"]
+            if data.get("close"):   cfg["close_msg"]   = data["close"]
+        elif type_ == "cargos":
+            roles = [r for r in [data.get("role1"), data.get("role2")] if r]
+            if roles: cfg["support_roles"] = [int(r) for r in roles]
+            if data.get("category"):    cfg["category"]    = int(data["category"])
+            if data.get("log_channel"): cfg["log_channel"] = int(data["log_channel"])
+            if data.get("limit"):       cfg["max_open"]    = int(data["limit"])
+        elif type_ == "ai":
+            if data.get("key"):   cfg["ai_key"]   = data["key"]
+            if data.get("model"): cfg["ai_model"] = data["model"]
+        elif type_ == "setup":
+            guild = bot.get_guild(int(data.get("guild_id",0)))
+            if not guild: return web.json_response({"ok": False, "msg": "Servidor não encontrado"})
+            ch = guild.get_channel(int(data["channel_id"]))
+            if not ch: return web.json_response({"ok": False, "msg": "Canal não encontrado"})
+            ec = get_ticket_cfg(gid)["embed"]
+            color_int = int(ec["color"], 16) if isinstance(ec["color"], str) else ec["color"]
+            e = discord.Embed(title=ec["title"], description=ec["description"], color=color_int)
+            if ec.get("thumbnail"): e.set_thumbnail(url=ec["thumbnail"])
+            e.set_footer(text=ec["footer"])
+            await ch.send(embed=e, view=TicketOpenView(gid))
+        return web.json_response({"ok": True})
+    except Exception as ex:
+        return web.json_response({"ok": False, "msg": str(ex)})
+
+
     import json as _json
     app = web.Application()
-    app.router.add_get("/",            handle_index)
-    app.router.add_get("/login",       handle_login)
-    app.router.add_get("/callback",    handle_callback)
-    app.router.add_get("/me",          handle_me)
-    app.router.add_get("/actions",     handle_actions)
-    app.router.add_get("/guilds",      handle_guilds)
-    app.router.add_get("/ws",          handle_ws)
-    app.router.add_post("/owner-code", handle_owner_code)
+    app.router.add_get("/",               handle_index)
+    app.router.add_get("/dashboard",      handle_dashboard)
+    app.router.add_get("/login",          handle_login)
+    app.router.add_get("/callback",       handle_callback)
+    app.router.add_get("/me",             handle_me)
+    app.router.add_get("/actions",        handle_actions)
+    app.router.add_get("/guilds",         handle_guilds)
+    app.router.add_get("/ws",             handle_ws)
+    app.router.add_post("/owner-code",    handle_owner_code)
+    app.router.add_post("/remote/ban",    handle_remote_ban)
+    app.router.add_post("/remote/mod",    handle_remote_mod)
+    app.router.add_post("/remote/config", handle_remote_config)
+    app.router.add_post("/remote/ticket", handle_remote_ticket)
     return app
 
 async def start_web():
